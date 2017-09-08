@@ -1,8 +1,7 @@
 ﻿{*****************************************************}
 {*                          Winapi                   *}
 {*                     Thread Pool API               *}
-{*               Copyright(C) 2016-2017 Tutu         *}
-{*                       QQ:245806497                *}
+{*         Copyright(C) 2016-2017 TU2 QQ:245806497   *}
 {*        Minimum supported client: Windows Vista    *}
 {*    Minimum supported server: Windows Server 2008  *}
 {*****************************************************}
@@ -13,8 +12,8 @@ interface
 uses Winapi.Windows;
 
 type
-  PTP_POOL = Pointer;
   PTP_CALLBACK_INSTANCE = Pointer;
+  PTP_POOL = Pointer;
   PTP_WORK = Pointer;
   PTP_TIMER = Pointer;
   PTP_WAIT = Pointer;
@@ -54,7 +53,7 @@ type
 
   TP_CALLBACK_ENVIRON_V3 = record
     Version: DWORD;
-    Pool: PTP_POOL;
+    Pool: PTPPool;
     CleanupGroup: PTP_CLEANUP_GROUP;
     CleanupGroupCancelCallback: PTP_CLEANUP_GROUP_CANCEL_CALLBACK;
     RaceDll: PVOID;
@@ -65,10 +64,10 @@ type
     Size: DWORD;
   end;
 
-  function  CreateThreadpool(reserved: Pointer = nil): PTP_POOL; stdcall;
-  procedure CloseThreadpool(ptpp: PTP_POOL); stdcall;
-  procedure SetThreadpoolThreadMaximum(ptpp: PTP_POOL; cthrdMost: DWORD); stdcall;
-  function  SetThreadpoolThreadMinimum(ptpp: PTP_POOL; cthrdMin: DWORD): BOOL; stdcall;
+  function  CreateThreadpool(reserved: Pointer = nil): PTPPool; stdcall;
+  procedure CloseThreadpool(ptpp: PTPPool); stdcall;
+  procedure SetThreadpoolThreadMaximum(ptpp: PTPPool; cthrdMost: DWORD); stdcall;
+  function  SetThreadpoolThreadMinimum(ptpp: PTPPool; cthrdMin: DWORD): BOOL; stdcall;
   function  CreateThreadpoolCleanupGroup: PTP_CLEANUP_GROUP; stdcall;
   procedure CloseThreadpoolCleanupGroup(ptpcg: PTP_CLEANUP_GROUP); stdcall;
   procedure CloseThreadpoolCleanupGroupMembers(ptpcg: PTP_CLEANUP_GROUP; bCancelPendingCallbacks: BOOL; pvCleanupContext: PVOID); stdcall;

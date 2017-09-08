@@ -19,14 +19,16 @@
   【限制】
   1、时间间隔使用毫秒(ms)为基本单位，注意DWORD能表示的最大间隔时间(49.7天);
   2、定时器首次开始时间使用100纳秒(100ns)为基本单位，注意正值为绝对UTC时间，
-     负值为相对时间;
+    负值为相对时间;
   【注意事项】
   1、在桌面程序中，主线程销毁GWorkers（执行CloseThreadpoolCleanupGroupMembers）
-     时，可能造成死锁，因为后台工作线程可能正在执行TThread.Synchronize。
-     这种情况下请在程序主窗体关闭事件中主动使用SafeClose方法关闭线程池。
+    时，可能造成死锁，因为后台工作线程可能正在执行TThread.Synchronize。
+    这种情况下请在程序主窗体关闭事件中主动使用SafeClose方法关闭线程池。
  --------------------------------------------------------------------
   更新记录
  --------------------------------------------------------------------
+ 2017.07.05 ver 1.5.0  - 重新定义回调接口，不回传内部Job对象
+ 2017.07.01 ver 1.4.0  - 信号作业只支持全局函数，删除冗余代码
  2017.05.16 ver 1.3.1  - IO作业只支持全局函数，删除冗余代码
  2017.02.25 ver 1.3.0  - 增加IO完成作业
  2017.01.14 ver 1.2.1  - 增加并行作业
@@ -43,8 +45,6 @@ unit uTuWorkers;
 
 interface
 
-{.$DEFINE USE_CALLBACK_INSTANCE}
-
 uses Winapi.Windows, Winapi.ThreadPool, System.SysUtils;
 
 type
@@ -58,51 +58,32 @@ type
     jdoDataIsSimpleRecord //附加数据是一个New创建的简单记录指针
     );
 
-  {$REGION '内部接口，请勿在作业处理回调中强行销毁'}
-  IJob = interface
-    function GetData: Pointer;
-    function GetFireFlag: Cardinal;
-    property Data: Pointer read GetData;
-    property FireFlag: Cardinal read GetFireFlag;
-  end;
-  IForJob = interface(IJob)
-    procedure BreakForJob;
-  end;
-  {$ENDREGION}
-
   /// <summary>作业处理回调成员函数</summary>
-  TJobProc = procedure(const AJob: IJob) of object;
+  TJobProc = procedure(const AJobData: Pointer) of object;
   /// <summary>作业处理回调全局函数</summary>
-  TJobProcG = procedure(const AJob: IJob);
+  TJobProcG = procedure(const AJobData: Pointer);
   /// <summary>作业处理回调匿名函数</summary>
-  TJobProcA = reference to procedure(const AJob: IJob);
+  TJobProcA = reference to procedure(const AJobData: Pointer);
   /// <summary>并行作业处理回调成员函数</summary>
-  TForJobProc = procedure(const AJob: IForJob; const AIndex: Integer) of object;
+  TForJobProc = procedure(var bBreaked: Boolean; const AIndex: Integer; const AJobData: Pointer) of object;
   /// <summary>并行作业处理回调全局函数</summary>
-  TForJobProcG = procedure(const AJob: IForJob; const AIndex: Integer);
+  TForJobProcG = procedure(var bBreaked: Boolean; const AIndex: Integer; const AJobData: Pointer);
   /// <summary>并行作业处理回调匿名函数</summary>
-  TForJobProcA = reference to procedure(const AJob: IForJob; const AIndex: Integer);
-
-  PUeTimerID = PTP_TIMER;
-  PUeSignalID = PTP_WAIT;
-  PUeWorkID = PTP_WORK;
-  PUeIoID = PTP_IO;
+  TForJobProcA = reference to procedure(var bBreaked: Boolean; const AIndex: Integer; const AJobData: Pointer);
 
   TuWorkers = class
   private type
-    TJob = class abstract(TInterfacedObject, IJob)
+    TJob = class abstract
     private
-      fFireFlag: Cardinal;            // 触发标记
       fData: Pointer;                 // 附加数据内容
       fOption: TJobDataOption;        // 作业数据选项
+      fFlag: Cardinal;                // 内部标记
       procedure InvokeCallback;
     protected
       procedure DoJob; virtual; abstract;
     public
-      destructor Destroy; override;
       constructor Create(const AData: Pointer; const AOption: TJobDataOption);
-      function GetData: Pointer;
-      function GetFireFlag: Cardinal;
+      destructor Destroy; override;
     end;
 
     TMJob = class(TJob)
@@ -128,37 +109,34 @@ type
       destructor Destroy; override;
     end;
 
-    TForJob = class abstract(TJob, IForJob)
+    TForJob = class abstract(TJob)
     private
       FIterator: Int64;
       FStopIndex: Integer;
-      FBreaked: Boolean;
     protected
       procedure DoJob; override;
-      procedure DoForJob(const AIndex: Integer); virtual; abstract;
-    public
-      procedure BreakForJob;
+      procedure DoForJob(var bBreaked:Boolean; const AIndex: Integer); virtual; abstract;
     end;
 
     TMForJob = class(TForJob)
     private
       fMethod: TForJobProc;
     protected
-      procedure DoForJob(const AIndex: Integer); override;
+      procedure DoForJob(var bBreaked:Boolean; const AIndex: Integer); override;
     end;
 
     TGForJob = class(TForJob)
     private
       fMethod: TForJobProcG;
     protected
-      procedure DoForJob(const AIndex: Integer); override;
+      procedure DoForJob(var bBreaked:Boolean; const AIndex: Integer); override;
     end;
 
     TAForJob = class(TForJob)
     private
       fMethod: TForJobProcA;
     protected
-      procedure DoForJob(const AIndex: Integer); override;
+      procedure DoForJob(var bBreaked:Boolean; const AIndex: Integer); override;
     public
       destructor Destroy; override;
     end;
@@ -173,11 +151,9 @@ type
       const APriority: TJobPriority; const ACleanup: Boolean);
     procedure PostSimple(const AJob: TJob; const APriority: TJobPriority);
     function PostTimer(const AJob: TJob; const APriority: TJobPriority;
-      const AStart: Int64; const AInterval: Cardinal): PUeTimerID;
-    function PostSignal(const AJob: TJob; const APriority: TJobPriority;
-      const AHandle: THandle; const ATimeout: Int64): PUeSignalID; overload;
-    function RegisterWork(const AJob: TJob; const APriority: TJobPriority): PUeWorkID; overload;
-    function PostForWork(const AJob: TForJob;const AStart, AStop: Integer): PUeWorkID;
+      const AStart: Int64; const AInterval: Cardinal): PTP_TIMER;
+    function RegisterWork(const AJob: TJob; const APriority: TJobPriority): PTP_WORK; overload;
+    function PostForWork(const AJob: TForJob;const AStart, AStop: Integer): PTP_WORK;
   public
     constructor Create;
     procedure Close;
@@ -204,82 +180,74 @@ type
     /// <param name="APriority">作业优先级</param>
     /// <param name="AData">作业附加的用户数据</param>
     /// <param name="AOption">作业附加数据释放选项</param>
-    /// <returns>线程池定时器ID</returns>
+    /// <returns>线程池定时器</returns>
     /// <remarks>如果绝对时间(AStartTime>0)在内部调用SetThreadpoolTimer时已过期，
     ///线程池定时器回调将不会触发。所以请使用一个距离当前时间足够大间隔的绝对时
     ///间指定首次触发时间，否则使用相对时间方式指定。</remarks>
     function PostAt(const AProc: TJobProc; const AStartTime: Int64=0;
       const AInterval: Cardinal=0; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone):PUeTimerID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_TIMER; overload;
     function PostAt(const AProc: TJobProcG; const AStartTime: Int64=0;
       const AInterval: Cardinal=0; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone):PUeTimerID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_TIMER; overload;
     function PostAt(const AProc: TJobProcA; const AStartTime: Int64=0;
       const AInterval: Cardinal=0; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone):PUeTimerID; overload;
-    /// <summary>投寄等待信号的作业</summary>
-    /// <param name="AProc">等待执行的作业过程</param>
-    /// <param name="AHandle">等待的同步信号句柄</param>
-    /// <param name="ATimeout">超时时间，单位为100ns。小于0，代表相对于当前时间的超时间隔；
-    ///等于0，代表无限长等待；大于0，代表超时相对于1601-1-1(UTC)的绝对时间，请使用类方法
-    ///DataTimeToUtcFileTime将一个TDateTime转换为UTC绝对时间。</param>
-    /// <param name="APriority">作业优先级</param>
-    /// <param name="AData">作业附加的用户数据</param>
-    /// <param name="AOption">作业附加数据释放选项</param>
-    /// <returns>线程池等待信号ID</returns>
-    function PostSignal(const AProc: TJobProc; const AHandle: THandle;
-      const ATimeout: Int64=0; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeSignalID; overload;
-    function PostSignal(const AProc: TJobProcG; const AHandle: THandle;
-      const ATimeout: Int64=0; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeSignalID; overload;
-    function PostSignal(const AProc: TJobProcA; const AHandle: THandle;
-      const ATimeout: Int64=0; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeSignalID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_TIMER; overload;
     /// <summary>注册工作项</summary>
     /// <param name="AProc">工作项作业过程</param>
     /// <param name="APriority">作业优先级</param>
     /// <param name="AData">作业附加的用户数据</param>
     /// <param name="AOption">作业附加数据释放选项</param>
-    /// <returns>线程池工作项ID</returns>
+    /// <returns>线程池工作项</returns>
     function RegisterWork(const AProc: TJobProc; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeWorkID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_WORK; overload;
     function RegisterWork(const AProc: TJobProcG; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeWorkID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_WORK; overload;
     function RegisterWork(const AProc: TJobProcA; const APriority: TJobPriority=jpNomal;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeWorkID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_WORK; overload;
+    /// <summary>投寄等待信号的作业</summary>
+    /// <param name="AHandle">等待的同步信号句柄</param>
+    /// <param name="ACallBack">信号触发时执行的作业过程</param>
+    /// <param name="AContext">作业过程上下文参数（全局）</param>
+    /// <param name="ATimeout">超时时间，单位为100ns。小于0，代表相对于当前时间的超时间隔；
+    ///等于0，代表无限长等待；大于0，代表超时相对于1601-1-1(UTC)的绝对时间，请使用类方法
+    ///DataTimeToUtcFileTime将一个TDateTime转换为UTC绝对时间。</param>
+    /// <param name="APriority">作业优先级</param>
+    /// <returns>线程池等待信号对象</returns>
+    function PostWait(const AHandle: THandle; const ACallBack: PTP_WAIT_CALLBACK;
+      const AContext: Pointer=nil; const ATimeout: Int64=0;
+      const APriority: TJobPriority=jpNomal): PTP_WAIT;
     /// <summary>投寄IO完成作业</summary>
     /// <param name="AHandle">IO完成对象绑定的句柄</param>
-    /// <param name="AJobProc">IO作业过程</param>
+    /// <param name="ACallBack">IO作业过程</param>
     /// <param name="AContext">IO上下文参数（全局）</param>
     /// <param name="APriority">IO作业优先级（默认高优先级）</param>
-    /// <returns>IO完成对象ID</returns>
-    function PostIO(const AHandle: THandle; const AJobProc: PTP_WIN32_IO_CALLBACK;
-      const AContext: Pointer=nil; const APriority: TJobPriority=jpNomal): PUeIoID; overload;
+    /// <returns>IO完成对象</returns>
+    function PostIO(const AHandle: THandle; const ACallBack: PTP_WIN32_IO_CALLBACK;
+      const AContext: Pointer=nil; const APriority: TJobPriority=jpNomal): PTP_IO;
     /// <summary>从指定的开始索引并行执行指定的过程到结束索引</summary>
     /// <param name="AWorkerProc">要并行执行的过程</param>
     /// <param name="AStart">起始索引（含）</param>
     /// <param name="AStop">结束索引（含）</param>
     /// <param name="AData">作业附加的用户数据</param>
     /// <param name="AOption">作业附加数据释放选项</param>
-    /// <returns>返回并行工作项ID</returns>
+    /// <returns>返回并行工作项</returns>
     function &For(const AProc: TForJobProc; const AStart, AEnd: Integer;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeWorkID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_WORK; overload;
     function &For(const AProc: TForJobProcG; const AStart, AEnd: Integer;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeWorkID; overload;
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_WORK; overload;
     function &For(const AProc: TForJobProcA; const AStart, AEnd: Integer;
-      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PUeWorkID; overload;
-
+      const AData: Pointer=nil; const AOption: TJobDataOption=jdoNone): PTP_WORK; overload;
     /// <summary>最小工作者（线程）数量，默认值1。</summary>
     property MinWorker: Cardinal read fMinWorker write SetMinWorker;
     /// <summary>最大工作者（线程）数量，默认值500。</summary>
     property MaxWorker: Cardinal read fMaxWorker write SetMaxWorker;
   public //内联辅助方法
     /// <summary>投寄已注册的工作项</summary>
-    /// <param name="AId">RegisterWork返回的Id</param>
-    class procedure PostWork(const AId: PUeWorkID); inline;
+    /// <param name="AWork">RegisterWork返回的Work</param>
+    class procedure PostWork(const AWork: PTP_WORK); inline;
     /// <summary>修改线程池定时器参数</summary>
-    /// <param name="AId">要修改的定时器ID。</param>
+    /// <param name="ATimer">要修改的定时器。</param>
     /// <param name="AInterval">重复作业时间间隔，单位为ms。等于0表示不重复，只执行一次。</param>
     /// <param name="AStartTime">首次开始时间，单位为100ns。等于0，表示立即执行；
     ///小于0，代表相对于当前时间的延时间隔(不包括系统休眠或睡眠的时间)；
@@ -289,37 +257,27 @@ type
     /// <remarks>如果绝对时间(AStartTime>0)在内部调用SetThreadpoolTimer时已过期，
     ///线程池定时器回调将不会触发。所以请使用一个距离当前时间足够大间隔的绝对时
     ///间指定首次触发时间，否则请使用相对时间方式指定。</remarks>
-    class procedure ModifyTimer(const AId: PUeTimerID; const AInterval: Cardinal=0;
+    class procedure ModifyTimer(const ATimer: PTP_TIMER; const AInterval: Cardinal=0;
        const AStartTime: Int64=0; const AWindowLength: Cardinal=10); inline;
     /// <summary>停止触发线程池定时器</summary>
-    /// <param name="AId">要停止的定时器索引ID</param>
-    class procedure StopTimer(const AId: PUeTimerID); inline;
+    /// <param name="ATimer">要停止的定时器</param>
+    class procedure StopTimer(const ATimer: PTP_TIMER); inline;
     /// <summary>修改等待信号参数</summary>
-    /// <param name="AId">要修改的等待信号Id</param>
+    /// <param name="AWait">要修改的等待信号Id</param>
     /// <param name="AHandle">要绑定的信号句柄</param>
     /// <param name="ATimeout">超时时间，单位为100ns。小于0，代表相对于当前时间的超时间隔；
     ///等于0，代表无限长等待；大于0，代表超时相对于1601-1-1(UTC)的绝对时间，请使用类方法
     ///DataTimeToUtcFileTime将一个TDateTime转换为UTC绝对时间。</param>
-    class procedure ModifySignal(const AId: PUeSignalID; const AHandle: THandle; const ATimeout: Int64); inline;
+    class procedure ModifyWait(const AWait: PTP_WAIT; const AHandle: THandle; const ATimeout: Int64); inline;
     /// <summary>停止触发（响应）等待信号</summary>
-    /// <param name="AId">要解绑的等待信号ID</param>
-    class procedure StopSignal(const AId: PUeSignalID); inline;
-    class procedure StartIO(const AId: PUeIoID); inline;
-    class procedure CancelIO(const AId: PUeIoID); inline;
-    class procedure CloseIO(const AId: PUeIoID); inline;
-    class procedure WaitForWork(const AId: PUeWorkID; const bCancelPending: Boolean=False); inline;
-    class procedure WaitForSignal(const AId: PUeSignalID; const bCancelPending: Boolean=False); inline;
-    class procedure WaitForTimer(const AId: PUeTimerID; const bCancelPending: Boolean=False); inline;
-    class procedure WaitForIO(const AId: PUeTimerID; const bCancelPending: Boolean=False); inline;
+    /// <param name="AWait">要解绑的等待信号</param>
+    class procedure StopWait(const AWait: PTP_WAIT); inline;
     class function DataTimeToUtcFileTime(const ATime: TDateTime): Int64; inline;
-    {$IFDEF USE_CALLBACK_INSTANCE}
-    class function SetMayRunLong: Boolean;
-    class procedure SetFreeLibrary(const hMod: HMODULE);
-    class procedure DisassociateCurrentThread;
-    {$ENDIF}
   end;
 
 const
+  MSecsPerMin = MSecsPerSec*SecsPerMin;
+  MSecsPerHour = MSecsPerSec*SecsPerHour;
   N100PerMSec = 10*1000;
   N100PerSec  = N100PerMSec*MSecsPerSec;
   Interval60s = Int64(-60)*N100PerSec;    //60s
@@ -330,16 +288,10 @@ implementation
 
 uses System.Classes;
 
-{$IFDEF USE_CALLBACK_INSTANCE}
-threadvar
-  CallBackInst: PTP_CALLBACK_INSTANCE;
-{$ENDIF}
-
 procedure Simple_Callback(Instance: PTP_CALLBACK_INSTANCE; Context: PVOID); stdcall;
 var
   AJob: TuWorkers.TJob;
 begin
-  {$IFDEF USE_CALLBACK_INSTANCE}CallBackInst := Instance;{$ENDIF}
   AJob := TuWorkers.TJob(Context);
   try
     AJob.InvokeCallback;
@@ -352,41 +304,20 @@ procedure Timer_Callback(Instance: PTP_CALLBACK_INSTANCE; Context: PVOID; Work: 
 var
   AJob: TuWorkers.TJob;
 begin
-  {$IFDEF USE_CALLBACK_INSTANCE}CallBackInst := Instance;{$ENDIF}
   AJob := TuWorkers.TJob(Context);
-  if System.AtomicCmpExchange(AJob.fFireFlag, 1, 0)=0 then
+  if System.AtomicCmpExchange(AJob.fFlag, 1, 0)=0 then
   begin
     try
       AJob.InvokeCallback;
     finally
-      System.AtomicExchange(AJob.fFireFlag, 0);
+      System.AtomicExchange(AJob.fFlag, 0);
     end;
   end;
 end;
 
 procedure Work_Callback(Instance: PTP_CALLBACK_INSTANCE; Context: PVOID; Work: PTP_WORK); stdcall;
-var
-  AJob: TuWorkers.TJob;
 begin
-  {$IFDEF USE_CALLBACK_INSTANCE}CallBackInst := Instance;{$ENDIF}
-  AJob := TuWorkers.TJob(Context);
-  System.AtomicIncrement(AJob.fFireFlag);
-  try
-    AJob.InvokeCallback;
-  finally
-    System.AtomicDecrement(AJob.fFireFlag);
-  end;
-end;
-
-procedure Wait_Callback(Instance: PTP_CALLBACK_INSTANCE; Context: PVOID; Work: PTP_WAIT;
-  WaitResult: TP_WAIT_RESULT); stdcall;
-var
-  AJob: TuWorkers.TJob;
-begin
-  {$IFDEF USE_CALLBACK_INSTANCE}CallBackInst := Instance;{$ENDIF}
-  AJob := TuWorkers.TJob(Context);
-  AJob.fFireFlag := WaitResult; //WAIT_OBJECT_0, WAIT_TIMEOUT(258), [WAIT_ABANDONED_0(128)]
-  AJob.InvokeCallback;
+  TuWorkers.TJob(Context).InvokeCallback;
 end;
 
 procedure CleanupGroupCancel_Callback(ObjectContext,CleanupContext: PVOID); stdcall;
@@ -450,7 +381,8 @@ end;
 procedure TuWorkers.Close;
 begin
   if fCG<>nil then
-  begin//may cause deadlock, please see/use SafeClose method.
+  begin
+    //may cause deadlock, please see/use SafeClose method.
     CloseThreadpoolCleanupGroupMembers(fCG, True, nil);
     CloseThreadpoolCleanupGroup(fCG);
   end;
@@ -512,7 +444,7 @@ begin
 end;
 
 function TuWorkers.PostTimer(const AJob: TJob; const APriority: TJobPriority;
-  const AStart: Int64; const AInterval: Cardinal): PUeTimerID;
+  const AStart: Int64; const AInterval: Cardinal): PTP_TIMER;
 var
   CBE: TP_CALLBACK_ENVIRON_V3;
 begin
@@ -526,22 +458,7 @@ begin
   end;
 end;
 
-function TuWorkers.PostSignal(const AJob: TJob; const APriority: TJobPriority;
-  const AHandle: THandle; const ATimeout: Int64): PUeSignalID;
-var
-  CBE: TP_CALLBACK_ENVIRON_V3;
-begin
-  InitCallBackEnviron(CBE, APriority, True);
-  Result := CreateThreadpoolWait(Wait_Callback, AJob, @CBE);
-  if Result<>nil then
-    ModifySignal(Result, AHandle, ATimeout)
-  else begin
-    AJob.Free;
-    RaiseLastOSError;
-  end;
-end;
-
-function TuWorkers.RegisterWork(const AJob: TJob; const APriority: TJobPriority): PUeWorkID;
+function TuWorkers.RegisterWork(const AJob: TJob; const APriority: TJobPriority): PTP_WORK;
 var
   CBE: TP_CALLBACK_ENVIRON_V3;
 begin
@@ -554,13 +471,11 @@ begin
   end;
 end;
 
-function TuWorkers.PostForWork(const AJob: TForJob; const AStart, AStop: Integer): PUeWorkID;
+function TuWorkers.PostForWork(const AJob: TForJob; const AStart, AStop: Integer): PTP_WORK;
 var
   AWorkerCount: Int64;
 begin
-  AWorkerCount := AStop;
-  Inc(AWorkerCount);
-  Dec(AWorkerCount, AStart);
+  AWorkerCount := AStop-AStart+1;
   if AWorkerCount>0 then
   begin
     if AWorkerCount>CPUCount then
@@ -611,7 +526,7 @@ end;
 
 function TuWorkers.PostAt(const AProc: TJobProc; const AStartTime: Int64;
   const AInterval: Cardinal; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeTimerID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_TIMER;
 var
   AJob: TMJob;
 begin
@@ -622,7 +537,7 @@ end;
 
 function TuWorkers.PostAt(const AProc: TJobProcG; const AStartTime: Int64;
   const AInterval: Cardinal; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeTimerID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_TIMER;
 var
   AJob: TGJob;
 begin
@@ -633,7 +548,7 @@ end;
 
 function TuWorkers.PostAt(const AProc: TJobProcA; const AStartTime: Int64;
   const AInterval: Cardinal; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeTimerID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_TIMER;
 var
   AJob: TAJob;
 begin
@@ -642,41 +557,8 @@ begin
   Result := PostTimer(AJob, APriority, AStartTime, AInterval);
 end;
 
-function TuWorkers.PostSignal(const AProc: TJobProc; const AHandle: THandle;
-  const ATimeout: Int64; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeSignalID;
-var
-  AJob: TMJob;
-begin
-  AJob := TMJob.Create(AData, AOption);
-  AJob.fMethod := AProc;
-  Result := PostSignal(AJob, APriority, AHandle, ATimeout);
-end;
-
-function TuWorkers.PostSignal(const AProc: TJobProcG; const AHandle: THandle;
-  const ATimeout: Int64; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeSignalID;
-var
-  AJob: TGJob;
-begin
-  AJob := TGJob.Create(AData, AOption);
-  AJob.fMethod := AProc;
-  Result := PostSignal(AJob, APriority, AHandle, ATimeout);
-end;
-
-function TuWorkers.PostSignal(const AProc: TJobProcA; const AHandle: THandle;
-  const ATimeout: Int64; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeSignalID;
-var
-  AJob: TAJob;
-begin
-  AJob := TAJob.Create(AData, AOption);
-  AJob.fMethod := AProc;
-  Result := PostSignal(AJob, APriority, AHandle, ATimeout);
-end;
-
 function TuWorkers.RegisterWork(const AProc: TJobProc; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeWorkID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_WORK;
 var
   AJob: TMJob;
 begin
@@ -686,7 +568,7 @@ begin
 end;
 
 function TuWorkers.RegisterWork(const AProc: TJobProcG; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeWorkID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_WORK;
 var
   AJob: TGJob;
 begin
@@ -696,7 +578,7 @@ begin
 end;
 
 function TuWorkers.RegisterWork(const AProc: TJobProcA; const APriority: TJobPriority;
-  const AData: Pointer; const AOption: TJobDataOption): PUeWorkID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_WORK;
 var
   AJob: TAJob;
 begin
@@ -705,19 +587,32 @@ begin
   Result := RegisterWork(AJob, APriority);
 end;
 
-function TuWorkers.PostIO(const AHandle: THandle; const AJobProc: PTP_WIN32_IO_CALLBACK;
-  const AContext: Pointer=nil; const APriority: TJobPriority=jpNomal): PUeIoID;
+function TuWorkers.PostWait(const AHandle: THandle; const ACallBack: PTP_WAIT_CALLBACK;
+  const AContext: Pointer=nil; const ATimeout: Int64=0; const APriority: TJobPriority=jpNomal): PTP_WAIT;
 var
   CBE: TP_CALLBACK_ENVIRON_V3;
 begin
   InitCallBackEnviron(CBE, APriority, False);
-  Result := CreateThreadpoolIo(AHandle, AJobProc, AContext, @CBE);
+  Result := CreateThreadpoolWait(ACallBack, AContext, @CBE);
+  if Result<>nil then
+    ModifyWait(Result, AHandle, ATimeout)
+  else
+    RaiseLastOSError;
+end;
+
+function TuWorkers.PostIO(const AHandle: THandle; const ACallback: PTP_WIN32_IO_CALLBACK;
+  const AContext: Pointer=nil; const APriority: TJobPriority=jpNomal): PTP_IO;
+var
+  CBE: TP_CALLBACK_ENVIRON_V3;
+begin
+  InitCallBackEnviron(CBE, APriority, False);
+  Result := CreateThreadpoolIo(AHandle, ACallback, AContext, @CBE);
   if Result=nil then
     RaiseLastOSError;
 end;
 
 function TuWorkers.&For(const AProc: TForJobProc; const AStart, AEnd: Integer;
-  const AData: Pointer; const AOption: TJobDataOption): PUeWorkID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_WORK;
 var
   AJob: TMForJob;
 begin
@@ -727,7 +622,7 @@ begin
 end;
 
 function TuWorkers.&For(const AProc: TForJobProcG; const AStart,AEnd: Integer;
-  const AData: Pointer; const AOption: TJobDataOption): PUeWorkID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_WORK;
 var
   AJob: TGForJob;
 begin
@@ -737,7 +632,7 @@ begin
 end;
 
 function TuWorkers.&For(const AProc: TForJobProcA; const AStart, AEnd: Integer;
-  const AData: Pointer; const AOption: TJobDataOption): PUeWorkID;
+  const AData: Pointer; const AOption: TJobDataOption): PTP_WORK;
 var
   AJob: TAForJob;
 begin
@@ -748,7 +643,7 @@ end;
 //------------------------------------------------------------------------------
 class procedure TuWorkers.PostWork;
 begin
-  SubmitThreadpoolWork(AId);
+  SubmitThreadpoolWork(AWork);
 end;
 
 class procedure TuWorkers.ModifyTimer;
@@ -757,65 +652,30 @@ var
 begin
   ATime.dwHighDateTime := Int64Rec(AStartTime).Hi;
 	ATime.dwLowDateTime := Int64Rec(AStartTime).Lo;
-  SetThreadpoolTimer(AId, @ATime, AInterval, AWindowLength);
+  SetThreadpoolTimer(ATimer, @ATime, AInterval, AWindowLength);
 end;
 
 class procedure TuWorkers.StopTimer;
 begin
-  SetThreadpoolTimer(AId, nil, 0, 0);
+  SetThreadpoolTimer(ATimer, nil, 0, 0);
 end;
 
-class procedure TuWorkers.ModifySignal;
+class procedure TuWorkers.ModifyWait;
 var
   ATime: TFileTime;
 begin
   if ATimeout=0 then
-    SetThreadpoolWait(AId, AHandle, nil)
+    SetThreadpoolWait(AWait, AHandle, nil)
   else begin
     ATime.dwHighDateTime := Int64Rec(ATimeout).Hi;
 	  ATime.dwLowDateTime := Int64Rec(ATimeout).Lo;
-    SetThreadpoolWait(AId, AHandle, @ATime);
+    SetThreadpoolWait(AWait, AHandle, @ATime);
   end;
 end;
 
-class procedure TuWorkers.StopSignal;
+class procedure TuWorkers.StopWait;
 begin
-  SetThreadpoolWait(AId, 0, nil);
-end;
-
-class procedure TuWorkers.StartIO;
-begin
-  StartThreadpoolIo(AId);
-end;
-
-class procedure TuWorkers.CancelIO;
-begin
-  CancelThreadpoolIo(AId);
-end;
-
-class procedure TuWorkers.CloseIO;
-begin
-  CloseThreadpoolIo(AId);
-end;
-
-class procedure TuWorkers.WaitForWork;
-begin
-  WaitForThreadpoolWorkCallbacks(AId, bCancelPending);
-end;
-
-class procedure TuWorkers.WaitForIO;
-begin
-  WaitForThreadpoolIoCallbacks(AId, bCancelPending);
-end;
-
-class procedure TuWorkers.WaitForSignal;
-begin
-  WaitForThreadpoolWaitCallbacks(AId, bCancelPending);
-end;
-
-class procedure TuWorkers.WaitForTimer;
-begin
-  WaitForThreadpoolTimerCallbacks(AId, bCancelPending);
+  SetThreadpoolWait(AWait, 0, nil);
 end;
 
 class function TuWorkers.DataTimeToUtcFileTime(const ATime: TDateTime): Int64;
@@ -830,23 +690,6 @@ begin
     Int64Rec(Result).Hi := v3.dwHighDateTime;
   end else RaiseLastOSError;
 end;
-
-{$IFDEF USE_CALLBACK_INSTANCE}
-class procedure TuWorkers.DisassociateCurrentThread;
-begin
-  DisassociateCurrentThreadFromCallback(CallBackInst);
-end;
-
-class procedure TuWorkers.SetFreeLibrary(const hMod: HMODULE);
-begin
-  FreeLibraryWhenCallbackReturns(CallBackInst, hMod);
-end;
-
-class function TuWorkers.SetMayRunLong: Boolean;
-begin
-  Result := CallbackMayRunLong(CallBackInst);
-end;
-{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -875,16 +718,6 @@ begin
   inherited;
 end;
 
-function TuWorkers.TJob.GetData: Pointer;
-begin
-  Result := fData;
-end;
-
-function TuWorkers.TJob.GetFireFlag: Cardinal;
-begin
-  Result := fFireFlag;
-end;
-
 procedure TuWorkers.TJob.InvokeCallback;
 begin
   try
@@ -898,20 +731,20 @@ end;
 
 procedure TuWorkers.TMJob.DoJob;
 begin
-  fMethod(Self);
+  fMethod(fData);
 end;
 
 { TuWorkers.TGJob }
 
 procedure TuWorkers.TGJob.DoJob;
 begin
-  fMethod(Self);
+  fMethod(fData);
 end;
 
 { TuWorkers.TAJob }
 procedure TuWorkers.TAJob.DoJob;
 begin
-  fMethod(Self);
+  fMethod(fData);
 end;
 
 destructor TuWorkers.TAJob.Destroy;
@@ -922,23 +755,26 @@ end;
 
 { TuWorkers.TForJob }
 
-procedure TuWorkers.TForJob.BreakForJob;
-begin
-  FBreaked := True;
-end;
-
 procedure TuWorkers.TForJob.DoJob;
 var
   I: Int64;
+  lBreaked: Boolean;
 begin
   I := System.AtomicIncrement(FIterator);
   if I<=FStopIndex then
   begin
     //SetThreadIdealProcessor(GetCurrentThread, System.AtomicIncrement(FIdeal));
     repeat
-      DoForJob(I);
+      lBreaked := False;
+      if fFlag>0 then Break;
+      DoForJob(lBreaked, I);
+      if lBreaked then
+      begin
+        System.AtomicIncrement(fFlag);
+        Break;
+      end;
       I := System.AtomicIncrement(FIterator);
-    until FBreaked or (I>FStopIndex);
+    until I>FStopIndex;
   end;
 end;
 
@@ -946,14 +782,14 @@ end;
 
 procedure TuWorkers.TMForJob.DoForJob;
 begin
-  fMethod(Self, AIndex);
+  fMethod(bBreaked, AIndex, fData);
 end;
 
 { TuWorkers.TGForJob }
 
 procedure TuWorkers.TGForJob.DoForJob;
 begin
-  fMethod(Self, AIndex);
+  fMethod(bBreaked, AIndex, fData);
 end;
 
 { TuWorkers.TAForJob }
@@ -966,7 +802,7 @@ end;
 
 procedure TuWorkers.TAForJob.DoForJob;
 begin
-  fMethod(Self, AIndex);
+  fMethod(bBreaked, AIndex, fData);
 end;
 
 initialization
